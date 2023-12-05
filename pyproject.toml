@@ -8,6 +8,8 @@ packages = [{include = "naacl_2024"}]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<4.0"
+pandas = "^2.1.3"
+more-itertools = "^10.1.0"
 
 
 [tool.poetry.group.dev.dependencies]
