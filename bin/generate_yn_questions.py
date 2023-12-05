@@ -95,6 +95,7 @@ def generate_yn_questions_for_row(df: pd.Series):
         "CT+": "certainly",
         "PS": "possibly",
     }
+    prefix = "At the time indicated by 🛑, is it the case that"
     # First order questions.
     for spkr, bel in itertools.product(("A", "B"), qmap.keys()):
         ret.append({
@@ -106,7 +107,7 @@ def generate_yn_questions_for_row(df: pd.Series):
             "cg_A": df.cg_A,
             "cg_B": df.cg_B,
             "order": 1,
-            "question": f"Does {spkr} believe it is {qmap[bel]} true that {df.event}?",
+            "question": f"{prefix} {spkr} believes it is {qmap[bel]} true that {df.event}?",
             "answer": "Yes" if resolve_1st_order_yn_answer(bel, df[f"belief_{spkr}"]) else "No",
             "context_type": df.context_type,
         })
@@ -123,7 +124,7 @@ def generate_yn_questions_for_row(df: pd.Series):
             "cg_B": df.cg_B,
             "order": 2,
             "question": (
-                f"Does {spkr1} believe that {spkr2} believes "
+                f"{prefix} {spkr1} believes that {spkr2} believes "
                 f"it is {qmap[bel]} true that {df.event}?"
             ),
             "answer": "Yes" if resolve_2nd_order_yn_answer(
@@ -146,7 +147,7 @@ def generate_yn_questions_for_row(df: pd.Series):
             "cg_B": df.cg_B,
             "order": 3,
             "question": (
-                f"Does {spkr1} believe that {spkr2} believes "
+                f"{prefix} {spkr1} believes that {spkr2} believes "
                 f"that {spkr3} believes it is {qmap[bel]} true that {df.event}?"
             ),
             "answer": "Yes" if resolve_3rd_order_yn_answer(
@@ -159,7 +160,27 @@ def generate_yn_questions_for_row(df: pd.Series):
     return pd.DataFrame(ret)
 
 
-def filter_to_interesting_events(df: pd.DataFrame):
+# XXX: This is dumb.
+def load_context_for(cid: int, annotator: str, sno: int) -> str:
+    df = cg.load(cid, annotator)[
+        ["Sno.", "Sentence"]
+    ].drop_duplicates().set_index("Sno.")
+    df.loc[sno, "Sentence"] = f"{df.loc[sno, 'Sentence']} 🛑"
+    return "\n".join(df.Sentence)
+
+
+# XXX: This is dumb.
+def load_contexts(cid: int, annotator: str) -> pd.DataFrame:
+    ret = []
+    for sno in sorted(cg.load(cid, annotator)["Sno."].unique()):
+        ret.append({
+            "sno": sno,
+            "context": load_context_for(cid, annotator, sno),
+        })
+    return pd.DataFrame(ret)
+
+
+def filter_to_interesting_events(df: pd.DataFrame) -> pd.DataFrame:
     ret = []
     min_sno, max_sno = df.sno.min(), df.sno.max()
     for eno, data in df.groupby("eno"):
@@ -178,12 +199,14 @@ def filter_to_interesting_events(df: pd.DataFrame):
     return pd.concat(ret)
 
 
-def generate_yn_questions(cid: int, annotator: str):
+def generate_yn_questions(cid: int, annotator: str) -> pd.DataFrame:
     ret = []
     events = filter_to_interesting_events(cg.load_events(cid, annotator))
     for _, row in events.iterrows():
         ret.append(generate_yn_questions_for_row(row))
-    return pd.concat(ret).assign(cid=cid, annotator=annotator)
+    return pd.concat(ret).assign(cid=cid, annotator=annotator).merge(
+        load_contexts(cid, annotator), how="left", on="sno"
+    )
 
 
 def main(ctx: Context) -> None:
@@ -197,8 +220,8 @@ def main(ctx: Context) -> None:
     os.makedirs(args.outdir, exist_ok=True)
     for cid in cg.CIDS:
         generate_yn_questions(cid, args.annotator).to_csv(outpath := os.path.join(
-            args.outdir, f"{cid}_{args.annotator}_yn_questions.csv"
-        ), index=False)
+            args.outdir, f"{cid}_{args.annotator}_yn_questions.csv.gz"
+        ), index=False, compression="gzip")
         ctx.log.info("wrote: %s", outpath)
     ctx.log.info("example output:\n%s", pd.read_csv(outpath))
 
