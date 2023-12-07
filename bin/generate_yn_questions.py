@@ -34,7 +34,7 @@ def resolve_2nd_order_yn_answer(qbel, sbel1, sbel2, cg1, cg2):
     This method resolves the truthiness of a second order belief question with
     the following form based on the annotations provided.
 
-        Does {spkr1} believe that
+        Is it the case that {spkr1} believes that
         {spkr2} believes that it is {qbel} true that {event}?
 
     Args:
@@ -66,7 +66,7 @@ def resolve_3rd_order_yn_answer(qbel, sbel1, sbel2, cg1, cg2):
     This method resolves the truthiness of a third order belief question with
     the following form based on the annotations provided.
 
-        Does {spkr1} believe that {spkr2} believes
+        Is it the case that {spkr1} believes that {spkr2} believes
         that {spkr1} believes it is {qbel} true that {event}?
 
     Args:
@@ -88,6 +88,7 @@ def resolve_3rd_order_yn_answer(qbel, sbel1, sbel2, cg1, cg2):
     return False
 
 
+# XXX: A lot of repeated code here.
 def generate_yn_questions_for_row(df: pd.Series):
     ret = []
     qmap = {
@@ -180,8 +181,28 @@ def load_contexts(cid: int, annotator: str) -> pd.DataFrame:
     return pd.DataFrame(ret)
 
 
+# Filters speech act events from questions (e.g. A asks ...)
+def filter_out_speech_act_events(df: pd.DataFrame) -> pd.DataFrame:
+    assert len(df.cid.unique()) == 1
+    speech_act_enos = []
+    events = df[["eno", "event"]].drop_duplicates()
+    events = events.assign(sno=list(map(int, events.eno)))[["sno", "eno", "event"]]
+    events = events.sort_values("eno")
+    for sno, data in events.groupby("sno"):
+        for left, right in itertools.pairwise(data.to_dict("records")):
+            if not left["event"].endswith(right["event"]):
+                continue
+            pretkns = left["event"].replace(right["event"], "").split(" ")
+            if pretkns[1] in ("asks", "jokes"):
+                speech_act_enos.append(left["eno"])
+            elif pretkns[1] == "said" and pretkns[2] == "that":
+                speech_act_enos.append(left["eno"])
+    return df[~df["eno"].isin(speech_act_enos)]
+
+
 def filter_to_interesting_events(df: pd.DataFrame) -> pd.DataFrame:
     ret = []
+    df = filter_out_speech_act_events(df)
     min_sno, max_sno = df.sno.min(), df.sno.max()
     for eno, data in df.groupby("eno"):
         updates = data.drop_duplicates(
@@ -192,11 +213,21 @@ def filter_to_interesting_events(df: pd.DataFrame) -> pd.DataFrame:
         mids = list(map(lambda x: (x[0] + x[1]) // 2, itertools.pairwise(ends)))
         mids = sorted(set(mids) - set(ends))
         curr = pd.concat([
-            data[data.sno.isin(ends)].assign(context_type="end"),
+            data[data.sno.isin(ends[1:-1])].assign(context_type="end"),
             data[data.sno.isin(mids)].assign(context_type="mid")
         ]).sort_values("sno")
         ret.append(curr)
     return pd.concat(ret)
+
+
+def filter_to_interesting_questions(df: pd.DataFrame) -> pd.DataFrame:
+    ret = []
+    for grp, data in df.groupby(["belief_A", "belief_B", "cg_A", "cg_B"]):
+        if grp == ("CT+", "CT+", "JA", "JA") or grp == ("NB", "NB", "NA", "NA"):
+            ret.append(data.sample(frac=0.1, replace=False, random_state=42))
+        else:
+            ret.append(data)
+    return pd.concat(ret).reset_index(drop=True)
 
 
 def generate_yn_questions(cid: int, annotator: str) -> pd.DataFrame:
@@ -204,8 +235,10 @@ def generate_yn_questions(cid: int, annotator: str) -> pd.DataFrame:
     events = filter_to_interesting_events(cg.load_events(cid, annotator))
     for _, row in events.iterrows():
         ret.append(generate_yn_questions_for_row(row))
-    return pd.concat(ret).assign(cid=cid, annotator=annotator).merge(
-        load_contexts(cid, annotator), how="left", on="sno"
+    return filter_to_interesting_questions(
+        pd.concat(ret).assign(cid=cid, annotator=annotator).merge(
+            load_contexts(cid, annotator), how="left", on="sno"
+        )
     )
 
 
@@ -217,13 +250,27 @@ def main(ctx: Context) -> None:
     ctx.parser.add_argument("-a", "--annotator", default="Magda")
     args = ctx.parser.parse_args()
     # Generate questions.
+    qs = []
     os.makedirs(args.outdir, exist_ok=True)
     for cid in cg.CIDS:
-        generate_yn_questions(cid, args.annotator).to_csv(outpath := os.path.join(
+        (q := generate_yn_questions(cid, args.annotator)).to_csv(outpath := os.path.join(
             args.outdir, f"{cid}_{args.annotator}_yn_questions.csv.gz"
         ), index=False, compression="gzip")
+        qs.append(q)
         ctx.log.info("wrote: %s", outpath)
-    ctx.log.info("example output:\n%s", pd.read_csv(outpath))
+    qs = pd.concat(qs).reset_index(drop=True)
+    # Summarize questions.
+    ctx.log.info("example output:\n%s", qs)
+    summary = qs.value_counts(["belief_A", "belief_B", "cg_A", "cg_B"])
+    summary = pd.concat([
+        summary, (summary / summary.sum()).to_frame("percent")
+    ], axis=1)
+    summary.loc[("", "", "", "total")] = summary.sum()
+    summary = summary.reset_index()
+    ctx.log.info("summary:\n%s", summary.to_string(index=False))
+    ans = qs.value_counts("answer")
+    ans = pd.concat([ans, (ans / ans.sum()).to_frame("percent")], axis=1)
+    ctx.log.info("answers:\n%s", ans.reset_index().to_string(index=False))
 
 
 if __name__ == "__main__":
