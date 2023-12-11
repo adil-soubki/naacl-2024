@@ -205,17 +205,13 @@ def filter_to_interesting_events(df: pd.DataFrame) -> pd.DataFrame:
     df = filter_out_speech_act_events(df)
     min_sno, max_sno = df.sno.min(), df.sno.max()
     for eno, data in df.groupby("eno"):
-        updates = data.drop_duplicates(
+        updates = data[data.sno >= int(eno)].drop_duplicates(
             ["eno", "belief_A", "belief_B"],
             keep="first"
         ).sort_values("sno")
-        ends = sorted({min_sno} | set(updates.sno) | {max_sno})
-        mids = list(map(lambda x: (x[0] + x[1]) // 2, itertools.pairwise(ends)))
-        mids = sorted(set(mids) - set(ends))
-        curr = pd.concat([
-            data[data.sno.isin(ends[1:-1])].assign(context_type="end"),
-            data[data.sno.isin(mids)].assign(context_type="mid")
-        ]).sort_values("sno")
+        curr = data[
+            data.sno.isin(sorted(set(updates.sno)))
+        ].assign(context_type="update")
         ret.append(curr)
     return pd.concat(ret)
 
