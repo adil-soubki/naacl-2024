@@ -7,11 +7,11 @@ Usage Examples:
     $ openai_zero_shot.py                   # No args needed.
     $ openai_zero_shot.py -o path/to/outdir # Custom outdir.
     $ openai_zero_shot.py --model gpt-4 --temperature 0.75
-
-TODO: Make calls to the API asynchronous.
 """
+import asyncio
 import datetime
 import hashlib
+import operator
 import os
 import time
 from typing import Any
@@ -19,6 +19,7 @@ from typing import Any
 import backoff
 import openai
 import pandas as pd
+from more_itertools import chunked
 from tqdm import tqdm
 
 from src.core.app import harness
@@ -43,12 +44,14 @@ def load_questions(window_size: int = 5) -> pd.DataFrame:
 
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError)
-def get_completion(
-    question: pd.Series, model_name: str, temperature: float = 1.0
+async def get_completion(
+    client: openai.AsyncOpenAI,
+    question: pd.Series,
+    model_name: str,
+    temperature: float = 1.0
 ) -> dict[str, Any]:
-    client = openai.OpenAI()
     prompt = TEMPLATE.format(context=question.context, question=question.question)
-    result = client.chat.completions.create(
+    result = await client.chat.completions.create(
         messages=[
             {
                 "role": "user",
@@ -69,13 +72,17 @@ def get_completion(
     }
 
 
-def get_completions(
+async def get_completions(
     model_name: str, temperature: float = 1.0
 ) -> list[dict[str, Any]]:
     ret = []
-    qs = load_questions()
-    for _, q in tqdm(list(qs.iterrows())):
-        ret.append(get_completion(q, model_name, temperature))
+    client = openai.AsyncOpenAI()
+    qs = map(operator.itemgetter(1), load_questions().iterrows())
+    tasks = [get_completion(client, q, model_name, temperature) for q in qs]
+    for chunk in tqdm(list(chunked(tasks, n=60))):
+        ret += await asyncio.gather(*chunk)
+        # Trying to respect rate limits.
+        time.sleep((60 / 5000) * len(chunk) * 10)
     return ret 
 
 
@@ -89,9 +96,9 @@ def main(ctx: Context) -> None:
     args = ctx.parser.parse_args()
     # Generate dialogues asynchronously.
     os.environ["OPENAI_API_KEY"] = keychain.get("IACS")
-    completions = pd.DataFrame(get_completions(args.model, args.temperature))
+    completions = pd.DataFrame(asyncio.run(get_completions(args.model, args.temperature)))
     # Write generations to file.
-    model_name = completions[0]["model_name"]
+    model_name = completions.iloc[0]["model_name"]
     phash = hashlib.shake_256(TEMPLATE.encode("utf-8")).hexdigest(8)
     outname = datetime.datetime.now().strftime(
         f"{model_name}_{phash}_%Y%m%d.%H%M%S.csv.gz"
